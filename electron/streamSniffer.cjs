@@ -162,10 +162,11 @@ async function getVideoDurationAcrossFrames(webContents) {
   return 0;
 }
 
-function estimateBytesForHeight(height, durationSec, bandwidthBps = 0) {
+function estimateBytesForHeight(height, durationSec, bandwidthBps = 0, hasSeparateAudio = false) {
   const dur = durationSec > 60 ? durationSec : 2700;
+  const audioBps = hasSeparateAudio ? 128_000 : 0;
   if (bandwidthBps > 50_000) {
-    return Math.round((bandwidthBps / 8) * dur);
+    return Math.round(((bandwidthBps + audioBps) / 8) * dur);
   }
   const kbpsMap = {
     2160: 6500,
@@ -184,7 +185,7 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
   let text = await fetchTextWithHeaders(effectiveUrl, headers);
 
   // If the captured URL is a child variant playlist like v0.m3u8, v1.m3u8, v2.m3u8, or index.m3u8,
-  // check if sibling master.m3u8 (Master Playlist with Audio + Video!) exists on the same CDN!
+  // check if sibling master.m3u8 (Master Playlist with All Qualities + Audio!) exists on the same CDN!
   if (text && !text.includes('#EXT-X-STREAM-INF') && /(%2F|\/)(?:v\d+|a\d+|index|playlist|video)\.m3u8/i.test(effectiveUrl)) {
     for (const masterName of ['master.m3u8', 'index.m3u8', 'playlist.m3u8']) {
       const candidateMasterUrl = effectiveUrl.replace(
@@ -204,7 +205,6 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
   let durationSec = hintDurationSec || 0;
   const isMaster = Boolean(text && text.includes('#EXT-X-STREAM-INF'));
 
-  // Check if master playlist explicitly declares audio tracks or audio codecs
   let manifestHasAudio = true;
   let separateAudioUrl = null;
 
@@ -212,13 +212,12 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
     const audioMediaMatch = text.match(/#EXT-X-MEDIA:[^\r\n]*TYPE=AUDIO[^\r\n]*URI="([^"]+)"/i);
     if (audioMediaMatch && audioMediaMatch[1]) {
       try {
-        separateAudioUrl = new URL(audioMediaMatch[1], m3u8Url).toString();
+        separateAudioUrl = new URL(audioMediaMatch[1], effectiveUrl).toString();
         manifestHasAudio = true;
       } catch (_) {}
     }
 
     if (isMaster) {
-      // Check CODECS attribute if present
       const codecsMatches = text.match(/CODECS="([^"]+)"/gi);
       if (codecsMatches && codecsMatches.length > 0 && !audioMediaMatch) {
         const anyHasAudioCodec = codecsMatches.some((c) => /mp4a|aac|ac-3|ec-3|opus|vorbis|mp3/i.test(c));
@@ -247,18 +246,35 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
       if (line.startsWith('#EXT-X-STREAM-INF:')) {
         const resMatch = line.match(/RESOLUTION=(\d+)x(\d+)/i);
         const bwMatch = line.match(/(?:AVERAGE-)?BANDWIDTH=(\d+)/i);
-        const nextLine = (lines[i + 1] || '').trim();
-        if (nextLine && !nextLine.startsWith('#') && !firstVariantUrl) {
+        // Find the next non-empty, non-comment line as the variant URL
+        let variantLine = '';
+        for (let j = i + 1; j < lines.length; j++) {
+          const candidate = lines[j].trim();
+          if (!candidate) continue;
+          if (!candidate.startsWith('#')) {
+            variantLine = candidate;
+          }
+          break;
+        }
+
+        let resolvedVariantUrl = null;
+        if (variantLine) {
           try {
-            firstVariantUrl = new URL(nextLine, m3u8Url).toString();
+            resolvedVariantUrl = new URL(variantLine, effectiveUrl).toString();
+            if (!firstVariantUrl) firstVariantUrl = resolvedVariantUrl;
           } catch (_) {}
         }
+
         if (resMatch) {
           const h = parseInt(resMatch[2], 10);
           const bw = bwMatch ? parseInt(bwMatch[1], 10) : 0;
           if (h >= 144 && h <= 4320) {
             if (!streamMap.has(h) || bw > streamMap.get(h).bandwidth) {
-              streamMap.set(h, { height: h, bandwidth: bw });
+              streamMap.set(h, {
+                height: h,
+                bandwidth: bw,
+                variantUrl: resolvedVariantUrl || effectiveUrl
+              });
             }
           }
         }
@@ -279,31 +295,38 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
     }
   }
 
-  // Also probe with FFmpeg if it's a single variant playlist or if we want to verify audio track presence
   if (ffmpegPath && (!isMaster || durationSec <= 0)) {
-    const probe = await probeMediaAudioAndDuration(ffmpegPath, m3u8Url, headers, 4000);
+    const probe = await probeMediaAudioAndDuration(ffmpegPath, effectiveUrl, headers, 4000);
     if (probe.probed) {
-      if (!separateAudioUrl) manifestHasAudio = probe.hasAudio;
+      if (!separateAudioUrl && !isMaster) manifestHasAudio = probe.hasAudio;
       if (durationSec <= 0 && probe.durationSec > 0) durationSec = probe.durationSec;
     }
   }
 
   const durationText = formatDuration(durationSec);
-  const heights = streamMap.size > 0
-    ? Array.from(streamMap.keys()).sort((a, b) => b - a)
-    : [1080, 720, 480, 360];
+  const standardHeights = [2160, 1440, 1080, 720, 480, 360];
+  const nativeHeights = Array.from(streamMap.keys()).sort((a, b) => b - a);
+  const highestNativeMeta = nativeHeights.length > 0 ? streamMap.get(nativeHeights[0]) : null;
 
   const qualities = [];
-  for (const h of heights) {
-    const meta = streamMap.get(h);
-    const estBytes = estimateBytesForHeight(h, durationSec, meta?.bandwidth || 0);
+  for (const h of standardHeights) {
+    const nativeMeta = streamMap.get(h);
+    // If master playlist has a native variant for this height, use its exact variantUrl & bandwidth!
+    // Otherwise, use the closest/best native stream and mark targetScaleHeight so FFmpeg scales it to the requested height!
+    const bw = nativeMeta ? nativeMeta.bandwidth : (highestNativeMeta?.bandwidth ? Math.round(highestNativeMeta.bandwidth * (h / (nativeHeights[0] || 720))) : 0);
+    const estBytes = estimateBytesForHeight(h, durationSec, bw, Boolean(separateAudioUrl));
     const rawSize = `~${formatBytes(estBytes)}`;
     const combined = durationText ? `${rawSize} / ${durationText}` : rawSize;
     const tag = h >= 2160 ? '4K Ultra HD' : h >= 1440 ? '2K QHD' : h >= 1080 ? 'Full HD' : h >= 720 ? 'HD' : 'Standard';
+
     qualities.push({
       id: `${h}p`,
       label: `${h}p (${tag}) — ${combined}`,
       height: h,
+      isNative: Boolean(nativeMeta),
+      variantUrl: nativeMeta?.variantUrl || highestNativeMeta?.variantUrl || effectiveUrl,
+      audioUrl: separateAudioUrl || null,
+      needsScale: !nativeMeta && nativeHeights.length > 0,
       estimatedBytes: estBytes,
       sizeText: rawSize,
       durationText,
@@ -319,6 +342,8 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
       label: `Audio Only (MP3) — ${durationText ? `${audioRawSize} / ${durationText}` : audioRawSize}`,
       height: 0,
       isAudioOnly: true,
+      variantUrl: separateAudioUrl || effectiveUrl,
+      audioUrl: separateAudioUrl || null,
       estimatedBytes: audioBytes,
       sizeText: audioRawSize,
       durationText,
@@ -329,6 +354,7 @@ async function parseM3u8Qualities(m3u8Url, headers, hintDurationSec = 0, ffmpegP
   return {
     effectiveUrl,
     qualities,
+    nativeHeights,
     durationSec,
     durationText,
     isMaster,
@@ -475,39 +501,21 @@ async function autoSniffStream(pageUrl, timeoutMs = 14000, app = null) {
           durationSec: durSec,
           durationText: durTxt,
           hasAudio: hasAud,
-          qualities: [
-            {
-              id: '1080p',
-              label: `1080p (Full HD) — ${bestStream.contentLength ? formatBytes(bestStream.contentLength) : '~450 MB'}`,
-              height: 1080,
-              estimatedBytes: bestStream.contentLength || 450 * 1024 * 1024,
-              sizeText: bestStream.contentLength ? formatBytes(bestStream.contentLength) : '~450 MB',
-              durationText: durTxt,
-              hasAudio: hasAud
-            },
-            {
-              id: '720p',
-              label: '720p (HD) — ~240 MB',
-              height: 720,
-              estimatedBytes: 240 * 1024 * 1024,
-              sizeText: '~240 MB',
-              durationText: durTxt,
-              hasAudio: hasAud
-            },
-            {
-              id: '480p',
-              label: '480p (Standard) — ~130 MB',
-              height: 480,
-              estimatedBytes: 130 * 1024 * 1024,
-              sizeText: '~130 MB',
-              durationText: durTxt,
-              hasAudio: hasAud
-            }
-          ]
+          qualities: [1080, 720, 480, 360].map((h) => ({
+            id: `${h}p`,
+            label: `${h}p`,
+            height: h,
+            variantUrl: bestStream.streamUrl,
+            needsScale: h !== 1080,
+            estimatedBytes: estimateBytesForHeight(h, durSec),
+            sizeText: `~${formatBytes(estimateBytesForHeight(h, durSec))}`,
+            durationText: durTxt,
+            hasAudio: hasAud
+          }))
         };
       }
 
-      if ( parsedInfo.effectiveUrl ) {
+      if (parsedInfo.effectiveUrl) {
         bestStream.streamUrl = parsedInfo.effectiveUrl;
       }
       const finalAudioUrl = parsedInfo.separateAudioUrl || separateAudioStreamUrl || null;
@@ -528,7 +536,11 @@ async function autoSniffStream(pageUrl, timeoutMs = 14000, app = null) {
         totalSize: parsedInfo.qualities[0]?.estimatedBytes || bestStream.contentLength || 0,
         sizeText: parsedInfo.qualities[0]?.sizeText || formatBytes(bestStream.contentLength),
         subtitles,
-        qualities: parsedInfo.qualities.map((q) => ({ ...q, hasAudio: finalHasAudio }))
+        qualities: parsedInfo.qualities.map((q) => ({
+          ...q,
+          audioUrl: q.audioUrl || finalAudioUrl,
+          hasAudio: finalHasAudio
+        }))
       });
     };
 
@@ -716,11 +728,11 @@ function openInteractiveStreamPicker(pageUrl, parentWindow, onStreamDetected, on
     }
   });
 
-  // Track master playlist so a child video-only variant .m3u8 NEVER overwrites the master .m3u8!
   let currentMasterStream = null;
-  let currentMasterTimestamp = 0;
+  let currentMasterUrl = '';
   let latestAudioStreamUrl = null;
   let subtitles = [];
+  let processingLock = false;
 
   const injectHelperBanner = async (streamReady = false, episodeTitle = '', sizeAndTimeBadge = '', hasAudio = true) => {
     if (!pickerWindow || pickerWindow.isDestroyed()) return;
@@ -745,7 +757,7 @@ function openInteractiveStreamPicker(pageUrl, parentWindow, onStreamDetected, on
                 <span>✅ Ready: ${episodeTitle.replace(/'/g, '')} (${sizeAndTimeBadge.replace(/'/g, '')} • ${audioBadgeText})</span>
               </div>
               <div style="color:#ecfdf5;background:rgba(0,0,0,0.28);padding:4px 12px;border-radius:8px;font-size:12px;font-weight:700;">
-                Sent to PlusGet! Switch to PlusGet to Download ▶
+                Sent to PlusGet! Switch to PlusGet to choose Quality & Download ▶
               </div>
             \`;
           } else {
@@ -777,112 +789,106 @@ function openInteractiveStreamPicker(pageUrl, parentWindow, onStreamDetected, on
       return;
     }
 
-    let pageTitle = 'Movie_Episode';
-    let domDuration = 0;
+    if (processingLock) return;
+    processingLock = true;
 
     try {
-      if (pickerWindow && !pickerWindow.isDestroyed()) {
-        const info = await pickerWindow.webContents.executeJavaScript(`
-          (function() {
-            const title = document.title || '';
-            let ep = '';
-            const activeEls = document.querySelectorAll('[class*="active" i], [class*="selected" i], [style*="rgb(220, 38, 38)"], .bg-red-600, .bg-red-500');
-            activeEls.forEach(el => {
-              const t = (el.innerText || '').trim();
-              if (/S\\d+.*E\\d+/i.test(t) || /^Episode\\s*\\d+/i.test(t)) ep = t;
-            });
-            return { title, ep };
-          })();
-        `);
-        domDuration = await getVideoDurationAcrossFrames(pickerWindow.webContents);
-        pageTitle = (info?.title || 'Video')
-          .replace(/\s*[-|]\s*(?:BaiscopeWatch|Watch Online|Free).*$/i, '')
-          .trim();
-        if (info?.ep && !pageTitle.includes(info.ep)) {
-          pageTitle = `${pageTitle} - ${info.ep.replace(/\s+/g, ' ')}`;
-        }
-      }
-    } catch (_) {}
+      let pageTitle = 'Movie_Episode';
+      let domDuration = 0;
 
-    let parsedInfo;
-    if (found.streamType === 'hls') {
-      parsedInfo = await parseM3u8Qualities(found.streamUrl, found.headers, domDuration, ffmpegPath);
-
-      // CRITICAL FIX: If we already captured a Master .m3u8 within the last 12 seconds for this episode,
-      // and the new request is a non-master child variant .m3u8 (which is often video-only!),
-      // DO NOT overwrite the Master .m3u8!
-      if (parsedInfo.isMaster) {
-        currentMasterStream = { found, parsedInfo };
-        currentMasterTimestamp = Date.now();
-      } else if (currentMasterStream && (Date.now() - currentMasterTimestamp < 12000)) {
-        return;
-      }
-    } else {
-      const probe = await probeMediaAudioAndDuration(ffmpegPath, found.streamUrl, found.headers, 4000);
-      const durSec = domDuration || probe.durationSec || 0;
-      const durTxt = formatDuration(durSec);
-      const hasAud = probe.probed ? probe.hasAudio : true;
-      parsedInfo = {
-        durationSec: durSec,
-        durationText: durTxt,
-        hasAudio: hasAud,
-        qualities: [
-          {
-            id: '1080p',
-            label: `1080p (Full HD) — ${found.contentLength ? formatBytes(found.contentLength) : '~450 MB'}`,
-            height: 1080,
-            estimatedBytes: found.contentLength || 450 * 1024 * 1024,
-            sizeText: found.contentLength ? formatBytes(found.contentLength) : '~450 MB',
-            durationText: durTxt,
-            hasAudio: hasAud
-          },
-          {
-            id: '720p',
-            label: '720p (HD) — ~240 MB',
-            height: 720,
-            estimatedBytes: 240 * 1024 * 1024,
-            sizeText: '~240 MB',
-            durationText: durTxt,
-            hasAudio: hasAud
-          },
-          {
-            id: '480p',
-            label: '480p (Standard) — ~130 MB',
-            height: 480,
-            estimatedBytes: 130 * 1024 * 1024,
-            sizeText: '~130 MB',
-            durationText: durTxt,
-            hasAudio: hasAud
+      try {
+        if (pickerWindow && !pickerWindow.isDestroyed()) {
+          const info = await pickerWindow.webContents.executeJavaScript(`
+            (function() {
+              const title = document.title || '';
+              let ep = '';
+              const activeEls = document.querySelectorAll('[class*="active" i], [class*="selected" i], [style*="rgb(220, 38, 38)"], .bg-red-600, .bg-red-500');
+              activeEls.forEach(el => {
+                const t = (el.innerText || '').trim();
+                if (/S\\d+.*E\\d+/i.test(t) || /^Episode\\s*\\d+/i.test(t)) ep = t;
+              });
+              return { title, ep };
+            })();
+          `);
+          domDuration = await getVideoDurationAcrossFrames(pickerWindow.webContents);
+          pageTitle = (info?.title || 'Video')
+            .replace(/\s*[-|]\s*(?:BaiscopeWatch|Watch Online|Free).*$/i, '')
+            .trim();
+          if (info?.ep && !pageTitle.includes(info.ep)) {
+            pageTitle = `${pageTitle} - ${info.ep.replace(/\s+/g, ' ')}`;
           }
-        ]
-      };
-    }
+        }
+      } catch (_) {}
 
-    if (parsedInfo.effectiveUrl) {
-      found.streamUrl = parsedInfo.effectiveUrl;
-    }
-    const finalAudioUrl = parsedInfo.separateAudioUrl || latestAudioStreamUrl || null;
-    const finalHasAudio = Boolean(parsedInfo.hasAudio || finalAudioUrl);
+      let parsedInfo;
+      if (found.streamType === 'hls') {
+        parsedInfo = await parseM3u8Qualities(found.streamUrl, found.headers, domDuration, ffmpegPath);
 
-    const topSize = parsedInfo.qualities[0]?.sizeText || '~350 MB';
-    const topDur = parsedInfo.durationText || formatDuration(parsedInfo.durationSec);
-    const badgeStr = topDur ? `${topSize} / ${topDur}` : topSize;
-    injectHelperBanner(true, pageTitle, badgeStr, finalHasAudio);
+        if (parsedInfo.effectiveUrl) {
+          found.streamUrl = parsedInfo.effectiveUrl;
+        }
 
-    if (onStreamDetected) {
-      onStreamDetected({
-        ...found,
-        audioUrl: finalAudioUrl,
-        hasAudio: finalHasAudio,
-        pageUrl,
-        pageTitle,
-        durationSec: parsedInfo.durationSec,
-        durationText: topDur,
-        totalSize: parsedInfo.qualities[0]?.estimatedBytes || found.contentLength || 0,
-        sizeText: topSize,
-        subtitles,
-        qualities: parsedInfo.qualities.map((q) => ({ ...q, hasAudio: finalHasAudio }))
-      });
+        if (parsedInfo.isMaster) {
+          currentMasterStream = { found, parsedInfo };
+          currentMasterUrl = found.streamUrl;
+        } else if (currentMasterStream && currentMasterUrl) {
+          // Do not overwrite an already-captured Master playlist with a single child variant
+          processingLock = false;
+          return;
+        }
+      } else {
+        const probe = await probeMediaAudioAndDuration(ffmpegPath, found.streamUrl, found.headers, 4000);
+        const durSec = domDuration || probe.durationSec || 0;
+        const durTxt = formatDuration(durSec);
+        const hasAud = probe.probed ? probe.hasAudio : true;
+        parsedInfo = {
+          durationSec: durSec,
+          durationText: durTxt,
+          hasAudio: hasAud,
+          qualities: [1080, 720, 480, 360].map((h) => ({
+            id: `${h}p`,
+            label: `${h}p`,
+            height: h,
+            variantUrl: found.streamUrl,
+            needsScale: h !== 1080,
+            estimatedBytes: estimateBytesForHeight(h, durSec),
+            sizeText: `~${formatBytes(estimateBytesForHeight(h, durSec))}`,
+            durationText: durTxt,
+            hasAudio: hasAud
+          }))
+        };
+      }
+
+      const finalAudioUrl = parsedInfo.separateAudioUrl || latestAudioStreamUrl || null;
+      const finalHasAudio = Boolean(parsedInfo.hasAudio || finalAudioUrl);
+
+      const defaultQ = parsedInfo.qualities.find((q) => q.isNative) || parsedInfo.qualities[0];
+      const topSize = defaultQ?.sizeText || '~280 MB';
+      const topDur = parsedInfo.durationText || formatDuration(parsedInfo.durationSec);
+      const badgeStr = topDur ? `${topSize} / ${topDur}` : topSize;
+      injectHelperBanner(true, pageTitle, badgeStr, finalHasAudio);
+
+      if (onStreamDetected) {
+        onStreamDetected({
+          ...found,
+          audioUrl: finalAudioUrl,
+          hasAudio: finalHasAudio,
+          pageUrl,
+          pageTitle,
+          durationSec: parsedInfo.durationSec,
+          durationText: topDur,
+          totalSize: defaultQ?.estimatedBytes || found.contentLength || 0,
+          sizeText: topSize,
+          subtitles,
+          qualities: parsedInfo.qualities.map((q) => ({
+            ...q,
+            audioUrl: q.audioUrl || finalAudioUrl,
+            hasAudio: finalHasAudio
+          }))
+        });
+      }
+    } finally {
+      processingLock = false;
     }
   });
 

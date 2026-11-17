@@ -24,6 +24,20 @@ const VIDEO_PLATFORM_DOMAINS = [
   'vk.com', 'ok.ru', 'nicovideo.jp', 'loom.com', 'wistia.com'
 ];
 
+function killProcessTree(proc) {
+  if (!proc) return;
+  try {
+    if (process.platform === 'win32' && proc.pid) {
+      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true });
+    } else {
+      proc.kill('SIGKILL');
+    }
+  } catch (_) {}
+  try {
+    proc.kill();
+  } catch (_) {}
+}
+
 function normalizeSpecialUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl.trim());
@@ -169,7 +183,7 @@ function runYtDlpJson(ytdlpPath, urlStr, timeoutMs = 18000) {
     let stderr = '';
 
     const timer = setTimeout(() => {
-      try { proc.kill(); } catch (_) {}
+      killProcessTree(proc);
       reject(new Error('Timed out while inspecting video streams.'));
     }, timeoutMs);
 
@@ -233,13 +247,12 @@ function buildQualityOptionsFromYtDlp(info) {
     }
   }
 
-  // Also check top-level info.acodec if formats array is minimal
   const topLevelAudio = Boolean(info.acodec && info.acodec !== 'none');
   const videoHasAudioOverall = formats.length === 0 ? true : (hasAnySeparateAudio || hasAnyCombinedAudio || topLevelAudio);
 
   const standardHeights = [2160, 1440, 1080, 720, 480, 360];
   const detectedHeights = Array.from(heightMap.keys()).sort((a, b) => b - a);
-  const heightsToUse = detectedHeights.length > 0 ? detectedHeights : standardHeights;
+  const heightsToUse = detectedHeights.length > 0 ? standardHeights : standardHeights;
 
   const labelForHeight = (h) => {
     if (h >= 2160) return `2160p (4K Ultra HD)`;
@@ -269,6 +282,8 @@ function buildQualityOptionsFromYtDlp(info) {
       id: `${h}p`,
       label: `${labelForHeight(h)} — ${durationText ? `${sizeStr} / ${durationText}` : sizeStr}`,
       height: h,
+      isNative: Boolean(meta),
+      needsScale: !meta && detectedHeights.length > 0,
       estimatedBytes: totalEst,
       sizeText: sizeStr,
       durationText,
@@ -335,7 +350,6 @@ async function analyzeUrl(rawUrl, strategy = 'auto', app) {
           }
         }
 
-        // If this is a direct video file (.mp4 / .webm / .mkv), probe with FFmpeg to check if Audio is included & get duration!
         let directHasAudio = true;
         let directDurationText = '';
         if (detectedCat === 'video' && ffmpegPath) {
@@ -627,7 +641,7 @@ class ActiveDownloadManager {
     if (!active) return false;
     active.paused = true;
     if (active.proc) {
-      try { active.proc.kill(); } catch (_) {}
+      killProcessTree(active.proc);
     }
     if (active.turbo) {
       active.turbo.pause();
@@ -640,7 +654,7 @@ class ActiveDownloadManager {
     if (active) {
       active.cancelled = true;
       if (active.proc) {
-        try { active.proc.kill(); } catch (_) {}
+        killProcessTree(active.proc);
       }
       if (active.turbo) {
         active.turbo.cancel();
@@ -648,6 +662,52 @@ class ActiveDownloadManager {
       this.jobs.delete(jobId);
     }
     return true;
+  }
+
+  _runYtDlpTrackDownload(ytdlpPath, ffmpegPath, trackUrl, headers, outPath, state, onProgressLine) {
+    return new Promise((resolve) => {
+      if (state.paused || state.cancelled) return resolve(false);
+
+      const args = [
+        '--newline',
+        '--no-playlist',
+        '--continue',
+        '--no-warnings',
+        '--no-check-certificates',
+        '--concurrent-fragments', '16',
+        '--buffer-size', '64K',
+        '-o', outPath
+      ];
+
+      if (headers && typeof headers === 'object') {
+        if (headers.Referer) args.push('--add-header', `Referer:${headers.Referer}`);
+        if (headers.Origin) args.push('--add-header', `Origin:${headers.Origin}`);
+        if (headers.Cookie) args.push('--add-header', `Cookie:${headers.Cookie}`);
+        if (headers['User-Agent']) args.push('--user-agent', headers['User-Agent']);
+      }
+
+      if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+        args.push('--ffmpeg-location', ffmpegPath);
+      }
+
+      args.push(trackUrl);
+
+      const proc = spawn(ytdlpPath, args, { windowsHide: true });
+      state.proc = proc;
+
+      const handleText = (text) => {
+        if (state.paused || state.cancelled) return;
+        if (onProgressLine) onProgressLine(text);
+      };
+
+      proc.stdout.on('data', (d) => handleText(d.toString()));
+      proc.stderr.on('data', (d) => handleText(d.toString()));
+
+      proc.on('close', (code) => {
+        resolve(code === 0);
+      });
+      proc.on('error', () => resolve(false));
+    });
   }
 
   _startYtDlpJob(job, onUpdate) {
@@ -666,8 +726,17 @@ class ActiveDownloadManager {
 
     const isAudioOnly = (job.quality || '').startsWith('audio') || ['mp3', 'm4a', 'wav', 'flac', 'opus'].includes(job.format);
     const targetFormat = (job.format || (isAudioOnly ? 'mp3' : 'mp4')).toLowerCase();
-    const safeBase = sanitizeFilename(job.title || 'video');
+    const heightMatch = (job.quality || '').match(/^(\d+)p$/);
+    const requestedHeight = heightMatch ? parseInt(heightMatch[1], 10) : 0;
+
+    // Include resolution in filename if it's a video so different quality downloads don't overwrite each other!
+    let safeBase = sanitizeFilename(job.title || 'video');
+    if (!isAudioOnly && requestedHeight && !safeBase.toLowerCase().includes(`${requestedHeight}p`)) {
+      safeBase = `${safeBase} (${requestedHeight}p)`;
+    }
+
     const outputTemplate = path.join(job.saveDir, `${safeBase}.%(ext)s`);
+    let finalFilePath = path.join(job.saveDir, `${safeBase}.${targetFormat}`);
 
     const args = [
       '--newline',
@@ -696,13 +765,10 @@ class ActiveDownloadManager {
       const bitrate = job.quality === 'audio-320' ? '320K' : job.quality === 'audio-128' ? '128K' : '192K';
       args.push('-x', '--audio-format', audioFmt, '--audio-quality', bitrate);
     } else {
-      const heightMatch = (job.quality || '').match(/^(\d+)p$/);
-      if (heightMatch) {
-        const h = parseInt(heightMatch[1], 10);
-        // Prefer m4a/aac audio first so merging is instant, fallback to any bestaudio and transcode audio to AAC!
+      if (requestedHeight) {
         args.push(
           '-f',
-          `bestvideo[height<=${h}]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`
+          `bestvideo[height<=${requestedHeight}]+bestaudio[ext=m4a]/bestvideo[height<=${requestedHeight}]+bestaudio/best[height<=${requestedHeight}]/best`
         );
       } else {
         args.push('-f', 'bestvideo+bestaudio[ext=m4a]/bestvideo+bestaudio/best');
@@ -712,9 +778,13 @@ class ActiveDownloadManager {
         args.push('--merge-output-format', targetFormat);
       }
 
-      // CRITICAL AUDIO FIX: Ensure audio inside .mp4 is always encoded as universal AAC (-c:a aac)
-      // so Windows Media Player / Movies & TV never plays a silent video due to Opus-in-MP4!
-      if (targetFormat === 'mp4') {
+      // If the user selected a quality button (e.g. 480p or 360p) that needs scaling, OR to guarantee AAC audio in .mp4:
+      if (job.needsScale && requestedHeight > 0) {
+        args.push(
+          '--postprocessor-args',
+          `Merger+ffmpeg:-vf scale=-2:${requestedHeight} -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 192k`
+        );
+      } else if (targetFormat === 'mp4') {
         args.push('--postprocessor-args', 'Merger+ffmpeg:-c:v copy -c:a aac -b:a 192k');
       }
     }
@@ -734,10 +804,12 @@ class ActiveDownloadManager {
     const proc = spawn(ytdlpPath, args, { windowsHide: true });
     state.proc = proc;
 
-    let finalFilePath = path.join(job.saveDir, `${safeBase}.${targetFormat}`);
     let lastErrorLine = '';
 
     const parseOutput = (text) => {
+      // CRITICAL PAUSE FIX: Never emit 'downloading' after user clicked Pause or Cancel!
+      if (state.paused || state.cancelled) return;
+
       const lines = text.split(/\r?\n/);
       for (const line of lines) {
         if (!line.trim()) continue;
@@ -806,56 +878,110 @@ class ActiveDownloadManager {
         return;
       }
       if (code === 0) {
-        this.jobs.delete(job.id);
-
-        // Verify if downloaded video file has an audio stream, and if a separate audioUrl was captured, merge it!
         let verifiedHasAudio = job.hasAudio !== false;
         if (ffmpegPath && fs.existsSync(finalFilePath) && !isAudioOnly) {
           const fileProbe = await probeMediaAudioAndDuration(ffmpegPath, finalFilePath, {}, 3500);
           if (fileProbe.probed) {
             verifiedHasAudio = fileProbe.hasAudio;
           }
-          // If the downloaded file has no audio AND we captured a separate audioUrl from the streaming player, merge them now!
-          if (!verifiedHasAudio && job.audioUrl) {
+
+          // If the downloaded video track has no audio AND we have a separate audioUrl (e.g. v2.m3u8 on vidbolt),
+          // download the audio track at 16x speed using yt-dlp and merge them with FFmpeg!
+          if (!verifiedHasAudio && job.audioUrl && !state.paused && !state.cancelled) {
+            onUpdate({
+              status: 'processing',
+              progress: 96,
+              speedText: 'Downloading Audio Track (16x)...',
+              etaText: 'Almost done'
+            });
+
+            const tempAudioPath = `${finalFilePath}.audio.m4a`;
+            const audioOk = await this._runYtDlpTrackDownload(
+              ytdlpPath,
+              ffmpegPath,
+              job.audioUrl,
+              job.headers,
+              tempAudioPath,
+              state
+            );
+
+            if (state.paused) {
+              this.jobs.delete(job.id);
+              return onUpdate({ status: 'paused', speedText: 'Paused', etaText: '-' });
+            }
+            if (state.cancelled) {
+              this.jobs.delete(job.id);
+              return onUpdate({ status: 'cancelled', speedText: '-', etaText: '-' });
+            }
+
+            if (audioOk && fs.existsSync(tempAudioPath)) {
+              onUpdate({
+                status: 'processing',
+                progress: 99,
+                speedText: 'Merging Video + Audio...',
+                etaText: 'Almost done'
+              });
+              const mergedTemp = `${finalFilePath}.merged.mp4`;
+              const ffArgs = ['-y', '-i', finalFilePath, '-i', tempAudioPath];
+              if (job.needsScale && requestedHeight > 0) {
+                ffArgs.push('-vf', `scale=-2:${requestedHeight}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23');
+              } else {
+                ffArgs.push('-c:v', 'copy');
+              }
+              ffArgs.push('-c:a', 'aac', '-b:a', '192k', '-map', '0:v:0', '-map', '1:a:0', '-shortest', mergedTemp);
+
+              await new Promise((resolve) => {
+                const mp = spawn(ffmpegPath, ffArgs, { windowsHide: true });
+                state.proc = mp;
+                mp.on('close', (mCode) => {
+                  try { if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath); } catch (_) {}
+                  if (mCode === 0 && fs.existsSync(mergedTemp)) {
+                    try {
+                      fs.unlinkSync(finalFilePath);
+                      fs.renameSync(mergedTemp, finalFilePath);
+                      verifiedHasAudio = true;
+                    } catch (_) {}
+                  } else {
+                    try { if (fs.existsSync(mergedTemp)) fs.unlinkSync(mergedTemp); } catch (_) {}
+                  }
+                  resolve();
+                });
+                mp.on('error', () => resolve());
+              });
+            }
+          } else if (job.needsScale && requestedHeight > 0 && !state.paused && !state.cancelled) {
+            // Ensure resolution matches selected app button if yt-dlp copied a single-stream file directly
             onUpdate({
               status: 'processing',
               progress: 99,
-              speedText: 'Merging Separate Audio Track...',
+              speedText: `Formatting to ${requestedHeight}p...`,
               etaText: 'Almost done'
             });
-            const mergedTemp = `${finalFilePath}.merged.mp4`;
-            const headerLines = [];
-            if (job.headers) {
-              if (job.headers.Referer) headerLines.push(`Referer: ${job.headers.Referer}`);
-              if (job.headers.Origin) headerLines.push(`Origin: ${job.headers.Origin}`);
-              if (job.headers.Cookie) headerLines.push(`Cookie: ${job.headers.Cookie}`);
-              if (job.headers['User-Agent']) headerLines.push(`User-Agent: ${job.headers['User-Agent']}`);
-            }
-            const ffArgs = ['-y', '-i', finalFilePath];
-            if (headerLines.length > 0) {
-              ffArgs.push('-headers', headerLines.join('\r\n') + '\r\n');
-            }
-            ffArgs.push('-i', job.audioUrl, '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0', '-shortest', mergedTemp);
-
+            const scaledTemp = `${finalFilePath}.scaled.mp4`;
             await new Promise((resolve) => {
-              const mp = spawn(ffmpegPath, ffArgs, { windowsHide: true });
-              mp.on('close', (mCode) => {
-                if (mCode === 0 && fs.existsSync(mergedTemp)) {
+              const sp = spawn(
+                ffmpegPath,
+                ['-y', '-i', finalFilePath, '-vf', `scale=-2:${requestedHeight}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', scaledTemp],
+                { windowsHide: true }
+              );
+              state.proc = sp;
+              sp.on('close', (sCode) => {
+                if (sCode === 0 && fs.existsSync(scaledTemp)) {
                   try {
                     fs.unlinkSync(finalFilePath);
-                    fs.renameSync(mergedTemp, finalFilePath);
-                    verifiedHasAudio = true;
+                    fs.renameSync(scaledTemp, finalFilePath);
                   } catch (_) {}
                 } else {
-                  try { if (fs.existsSync(mergedTemp)) fs.unlinkSync(mergedTemp); } catch (_) {}
+                  try { if (fs.existsSync(scaledTemp)) fs.unlinkSync(scaledTemp); } catch (_) {}
                 }
                 resolve();
               });
-              mp.on('error', () => resolve());
+              sp.on('error', () => resolve());
             });
           }
         }
 
+        this.jobs.delete(job.id);
         let sizeBytes = 0;
         try {
           if (fs.existsSync(finalFilePath)) {
@@ -873,7 +999,7 @@ class ActiveDownloadManager {
           completedAt: new Date().toISOString()
         });
       } else if (ffmpegPath && fs.existsSync(ffmpegPath) && (job.url.includes('.m3u8') || job.headers)) {
-        this._startFfmpegStreamFallback(job, ffmpegPath, finalFilePath, state, onUpdate);
+        this._startFfmpegStreamFallback(job, ffmpegPath, finalFilePath, requestedHeight, state, onUpdate);
       } else {
         this.jobs.delete(job.id);
         onUpdate({
@@ -886,6 +1012,7 @@ class ActiveDownloadManager {
     });
 
     proc.on('error', (err) => {
+      if (state.paused || state.cancelled) return;
       this.jobs.delete(job.id);
       onUpdate({
         status: 'error',
@@ -896,7 +1023,9 @@ class ActiveDownloadManager {
     });
   }
 
-  _startFfmpegStreamFallback(job, ffmpegPath, finalFilePath, state, onUpdate) {
+  _startFfmpegStreamFallback(job, ffmpegPath, finalFilePath, requestedHeight, state, onUpdate) {
+    if (state.paused || state.cancelled) return;
+
     const headerLines = [];
     if (job.headers) {
       if (job.headers.Referer) headerLines.push(`Referer: ${job.headers.Referer}`);
@@ -914,9 +1043,17 @@ class ActiveDownloadManager {
       if (headerLines.length > 0) {
         ffArgs.push('-headers', headerLines.join('\r\n') + '\r\n');
       }
-      ffArgs.push('-i', job.audioUrl, '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0');
+      ffArgs.push('-i', job.audioUrl);
+    }
+
+    if (job.needsScale && requestedHeight > 0) {
+      ffArgs.push('-vf', `scale=-2:${requestedHeight}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac');
     } else {
       ffArgs.push('-c:v', 'copy', '-c:a', 'aac');
+    }
+
+    if (job.audioUrl) {
+      ffArgs.push('-map', '0:v:0', '-map', '1:a:0', '-shortest');
     }
     ffArgs.push(finalFilePath);
 
@@ -971,7 +1108,11 @@ class ActiveDownloadManager {
     const tempFilePath = path.join(job.saveDir, `${baseName}.part`);
     const finalDestPath = path.join(job.saveDir, baseName);
 
-    const turbo = new TurboSegmentedJob(job, 8, onUpdate);
+    const turbo = new TurboSegmentedJob(job, 8, (patch) => {
+      const st = this.jobs.get(job.id);
+      if (st && (st.paused || st.cancelled)) return;
+      onUpdate(patch);
+    });
     const state = { turbo, paused: false, cancelled: false };
     this.jobs.set(job.id, state);
 

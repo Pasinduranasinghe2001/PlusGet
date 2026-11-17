@@ -145,7 +145,8 @@ export default function App() {
           setSelectedQuality('original');
           setSelectedFormat(capturedData.formats?.[0] || capturedData.ext || 'original');
         } else {
-          setSelectedQuality('1080p');
+          const nativeQ = (capturedData.qualities || []).find((q) => q.isNative && !q.isAudioOnly);
+          setSelectedQuality(nativeQ ? nativeQ.id : '1080p');
           setSelectedFormat('mp4');
         }
         setStreamCapturedBanner(true);
@@ -184,7 +185,11 @@ export default function App() {
         durationText: durStr,
         combinedSizeTime,
         hasAudio: card.isAudio ? globalHasAudio : cardHasAudio,
-        estimatedBytes: matched?.estimatedBytes || 0
+        estimatedBytes: matched?.estimatedBytes || 0,
+        variantUrl: matched?.variantUrl || null,
+        audioUrl: matched?.audioUrl || null,
+        isNative: Boolean(matched?.isNative),
+        needsScale: Boolean(matched?.needsScale)
       };
     });
   }, [analyzedData]);
@@ -266,7 +271,8 @@ export default function App() {
         setSelectedQuality('original');
         setSelectedFormat(result.formats?.[0] || result.ext || 'original');
       } else {
-        setSelectedQuality('1080p');
+        const nativeQ = (result.qualities || []).find((q) => q.isNative && !q.isAudioOnly);
+        setSelectedQuality(nativeQ ? nativeQ.id : '1080p');
         setSelectedFormat('mp4');
       }
     } catch (_) {
@@ -302,9 +308,15 @@ export default function App() {
     const isAudio = !isDirectFile && (selectedQuality.startsWith('audio') || selectedFormat === 'mp3' || selectedFormat === 'wav');
     const chosenCard = qualityCardsWithSize.find((c) => c.id === selectedQuality);
 
+    // Use the exact resolution stream URL (variantUrl) for the selected quality button if available!
+    const effectiveStreamUrl = (!isDirectFile && chosenCard?.variantUrl)
+      ? chosenCard.variantUrl
+      : target;
+
     const payload = {
-      url: target,
-      audioUrl: analyzedData?.audioUrl || null,
+      url: effectiveStreamUrl,
+      audioUrl: chosenCard?.audioUrl || analyzedData?.audioUrl || null,
+      needsScale: Boolean(chosenCard?.needsScale),
       hasAudio: currentHasAudio,
       pageUrl: analyzedData?.pageUrl || urlInput.trim(),
       headers: analyzedData?.headers || null,
@@ -988,13 +1000,20 @@ export default function App() {
                             }`}
                           >
                             <div className="flex items-center justify-between mb-1.5">
-                              <span
-                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded ${
-                                  active ? 'bg-cyan-400 text-slate-950' : 'bg-slate-800 text-slate-300'
-                                }`}
-                              >
-                                {card.badge}
-                              </span>
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className={`text-[10px] font-extrabold px-2 py-0.5 rounded ${
+                                    active ? 'bg-cyan-400 text-slate-950' : 'bg-slate-800 text-slate-300'
+                                  }`}
+                                >
+                                  {card.badge}
+                                </span>
+                                {analyzedData && card.isNative && (
+                                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    Native
+                                  </span>
+                                )}
+                              </div>
                               {card.hasAudio ? (
                                 <span className="text-[10px] font-bold text-cyan-300 flex items-center gap-0.5" title="Audio Included">
                                   <Volume2 className="w-3 h-3" />

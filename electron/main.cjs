@@ -100,10 +100,19 @@ function processQueue() {
 
     downloadManager.startJob(job, (patch) => {
       const idx = queue.findIndex((q) => q.id === job.id);
-      if (idx !== -1) {
-        queue[idx] = { ...queue[idx], ...patch };
-        broadcastQueue();
+      if (idx === -1) return;
+
+      // CRITICAL PAUSE FIX: If user paused or cancelled this job, ignore any late 'downloading' or 'processing' progress ticks
+      if (
+        (queue[idx].status === 'paused' || queue[idx].status === 'cancelled') &&
+        (patch.status === 'downloading' || patch.status === 'processing')
+      ) {
+        return;
       }
+
+      queue[idx] = { ...queue[idx], ...patch };
+      broadcastQueue();
+
       if (['completed', 'error', 'paused', 'cancelled'].includes(patch.status)) {
         processQueue();
       }
@@ -374,6 +383,7 @@ function createJobRecord(item) {
     id: `dl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     url: item.url,
     audioUrl: item.audioUrl || null,
+    needsScale: Boolean(item.needsScale),
     hasAudio: item.hasAudio !== false,
     pageUrl: item.pageUrl || item.originalUrl || item.url,
     headers: item.headers || null,
@@ -424,15 +434,10 @@ ipcMain.handle('queue:add-batch', (_e, items) => {
 ipcMain.handle('queue:pause', (_e, id) => {
   const idx = queue.findIndex((j) => j.id === id);
   if (idx === -1) return false;
-  if (queue[idx].status === 'queued') {
-    queue[idx].status = 'paused';
-    queue[idx].speedText = 'Paused';
-    broadcastQueue();
-    return true;
-  }
-  downloadManager.pauseJob(id);
   queue[idx].status = 'paused';
   queue[idx].speedText = 'Paused';
+  queue[idx].etaText = '-';
+  downloadManager.pauseJob(id);
   broadcastQueue();
   processQueue();
   return true;
