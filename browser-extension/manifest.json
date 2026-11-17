@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "PlusGet — Turbo Download Manager Integration",
+  "version": "1.0.0",
+  "description": "Automatically intercepts browser downloads, videos, movies, and images and accelerates them up to 16x in PlusGet Desktop.",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "storage",
+    "tabs",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:45789/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      width: 290px;
+      margin: 0;
+      padding: 16px;
+      background: #090d16;
+      color: #f1f5f9;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 800;
+      font-size: 15px;
+      color: #38bdf8;
+    }
+    .brand img {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+    }
+    .status {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 99px;
+      font-weight: 700;
+    }
+    .online {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .offline {
+      background: rgba(244, 63, 94, 0.15);
+      color: #fb7185;
+      border: 1px solid rgba(244, 63, 94, 0.3);
+    }
+    .card {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .sub {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(90deg, #06b6d4, #8b5cf6);
+      color: #090d16;
+      font-weight: 800;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn:hover {
+      opacity: 0.92;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <img src="icon.png" alt="PlusGet" />
+      <span>PlusGet Turbo</span>
+    </div>
+    <span id="statusBadge" class="status offline">Checking...</span>
+  </div>
+
+  <div class="card">
+    <label class="row" style="cursor:pointer;">
+      <span>Take Over Browser Downloads</span>
+      <input type="checkbox" id="toggleIntercept" checked />
+    </label>
+    <div class="sub">
+      Automatically intercept clicked download buttons and accelerate them in PlusGet.
+    </div>
+  </div>
+
+  <button id="grabTabBtn" class="btn">
+    🎬 Download Video on This Tab
+  </button>
+
+  <script src="popup.js"></script>
+</body>
+</html>
