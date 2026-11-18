@@ -5,12 +5,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Pasinduranasinghe2001/PlusGet/releases/download/v1.0.0/PlusGet-Setup-1.0.0.exe">
+  <a href="setup/PlusGet-Setup-1.0.0.exe?raw=true">
     <b>⬇ Download PlusGet Windows Setup Installer (PlusGet-Setup-1.0.0.exe)</b>
   </a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/Pasinduranasinghe2001/PlusGet/releases/download/v1.0.0/PlusGet-Portable-1.0.0.exe">
-    <b>⚡ Download PlusGet Portable (PlusGet-Portable-1.0.0.exe)</b>
+  <a href="setup/PlusGet-Setup-1.0.0.exe">
+    <b>📁 View Setup Installer in Repository (setup/PlusGet-Setup-1.0.0.exe)</b>
   </a>
 </p>
 
@@ -31,8 +31,8 @@
 
 ## Download & Install (Windows PC)
 
-- **Windows Setup Installer**: [`setup/PlusGet-Setup-1.0.0.exe`](setup/PlusGet-Setup-1.0.0.exe) or from [**GitHub Releases (v1.0.0)**](https://github.com/Pasinduranasinghe2001/PlusGet/releases/tag/v1.0.0)
-- **Single-File Portable Executable**: [**PlusGet-Portable-1.0.0.exe**](https://github.com/Pasinduranasinghe2001/PlusGet/releases/download/v1.0.0/PlusGet-Portable-1.0.0.exe)
+- **Direct Download (Windows Setup Installer)**: [**⬇ Download PlusGet-Setup-1.0.0.exe**](setup/PlusGet-Setup-1.0.0.exe?raw=true)
+- **Repository File Page**: [`setup/PlusGet-Setup-1.0.0.exe`](setup/PlusGet-Setup-1.0.0.exe)
 
 ## Development Setup
 
