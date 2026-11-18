@@ -1,10 +1,9 @@
 # Dependencies
 node_modules/
 
-# Build & Packaged Installers (.exe / release)
+# Build & Unpacked Release Output
 release/
 dist/
-*.exe
 *.msi
 *.blockmap
 *.part

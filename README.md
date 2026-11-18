@@ -4,20 +4,35 @@
   <img src="public/logo.png" width="128" alt="PlusGet Logo" />
 </p>
 
-**PlusGet** is a high-speed desktop download manager and universal video/file grabber built with **Electron**, **React**, **Tailwind CSS**, **Node.js**, **`yt-dlp`**, and **`FFmpeg`**.
+<p align="center">
+  <a href="https://github.com/Pasinduranasinghe2001/PlusGet/releases/download/v1.0.0/PlusGet-Setup-1.0.0.exe">
+    <b>⬇ Download PlusGet Windows Setup Installer (PlusGet-Setup-1.0.0.exe)</b>
+  </a>
+  &nbsp;|&nbsp;
+  <a href="https://github.com/Pasinduranasinghe2001/PlusGet/releases/download/v1.0.0/PlusGet-Portable-1.0.0.exe">
+    <b>⚡ Download PlusGet Portable (PlusGet-Portable-1.0.0.exe)</b>
+  </a>
+</p>
+
+**PlusGet** is a high-speed desktop download manager and universal video/file grabber for Windows PC built with **Electron**, **React**, **Tailwind CSS**, **Node.js**, **`yt-dlp`**, and **`FFmpeg`**.
 
 ## Key Features
 
 - **Pre-Download File Name, MB Size, Play Time & Audio Detection**:
   - Displays the editable **File Name**, **Size & Play Time** (e.g., `~280 MB / 1h 30m`), and **Audio Track Status** (`🔊 Audio Included (AAC)` vs. `🔇 No Audio (Video Only)`) before downloading.
 - **Universal Movie, TV Series & Social Video Downloader**:
-  - Supports **YouTube, TikTok, Facebook, Instagram, X/Twitter, Vimeo, Reddit**, and **Multi-Server / Multi-Episode Movie & TV Streaming Websites** via a built-in **Smart Stream Sniffer & Episode Picker** with automatic ad/popup blocking and HLS `master.m3u8` audio+video merging.
+  - Supports **YouTube, TikTok, Facebook, Instagram, X/Twitter, Vimeo, Reddit**, and **Multi-Server / Multi-Episode Movie & TV Streaming Websites** via a built-in **Smart Stream Sniffer & Episode Picker** with automatic ad/popup blocking, per-resolution quality selection (`4K`, `1080p`, `720p`, `480p`, `360p`, `MP3`), and HLS `master.m3u8` audio+video merging.
 - **8x–16x Parallel Turbo Download Engine (Like IDM)**:
-  - Splits direct files (`.exe`, `.msi`, `.iso`, `.zip`, code, documents, images) into **8 parallel byte-range connections** and downloads **16 concurrent stream segments** for videos.
+  - Splits direct files (`.exe`, `.msi`, `.iso`, `.zip`, code, documents, images) into **8 parallel byte-range connections** and downloads **16 concurrent stream segments** for videos with full **Pause & Resume** support.
 - **Browser Download Button Takeover (`browser-extension/`)**:
   - Includes a Chrome / Edge / Brave extension (`browser-extension/`) and local bridge (`127.0.0.1:45789`) that automatically intercepts browser download buttons, adds a floating **`⬇ Download Video with PlusGet`** button over web video players, and adds right-click **Download Image / Link with PlusGet** menu items.
 - **Full Image & Webpage Asset Grabber**:
   - Download individual images with format conversion (`.JPG`, `.PNG`, `.WEBP`, `.ICO`) or scan any webpage URL to batch-download all images, videos, setups, and files.
+
+## Download & Install (Windows PC)
+
+- **Windows Setup Installer**: [`setup/PlusGet-Setup-1.0.0.exe`](setup/PlusGet-Setup-1.0.0.exe) or from [**GitHub Releases (v1.0.0)**](https://github.com/Pasinduranasinghe2001/PlusGet/releases/tag/v1.0.0)
+- **Single-File Portable Executable**: [**PlusGet-Portable-1.0.0.exe**](https://github.com/Pasinduranasinghe2001/PlusGet/releases/download/v1.0.0/PlusGet-Portable-1.0.0.exe)
 
 ## Development Setup
 
@@ -33,4 +48,7 @@ npm run build
 
 # Start Electron desktop app
 npm start
+
+# Package Windows Setup Installer & Portable .exe
+npm run dist
 ```
